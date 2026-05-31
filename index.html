@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>我的首款手机 4K 音游</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #1a1a1a;
+            color: #fff;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+            /* 防止手机浏览器自带的长按选中和双击缩放 */
+            touch-action: none;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+        }
+        #game-container {
+            position: relative;
+            width: 95vw;
+            max-width: 400px;
+            aspect-ratio: 2 / 3; /* 保持经典比例 */
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            background-color: #111;
+            border: 2px solid #444;
+            border-radius: 8px;
+            box-sizing: border-box;
+        }
+        #ui {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            font-size: 18px;
+            font-weight: bold;
+            pointer-events: none;
+            font-family: monospace;
+        }
+        #judgment {
+            position: absolute;
+            top: 55%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 36px;
+            font-weight: bold;
+            text-shadow: 0 0 10px rgba(255,255,255,0.8);
+            pointer-events: none;
+        }
+        #start-btn {
+            padding: 15px 30px;
+            font-size: 20px;
+            background-color: #007acc;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 25px;
+            font-weight: bold;
+            box-shadow: 0 4px 10px rgba(0,122,204,0.4);
+            z-index: 10;
+        }
+        #hint {
+            position: absolute;
+            bottom: -30px;
+            width: 100%;
+            text-align: center;
+            color: #666;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+
+    <button id="start-btn">点击开始游戏</button>
+    <div id="game-container" style="display: none;">
+        <canvas id="gameCanvas" width="400" height="600"></canvas>
+        <div id="ui">
+            <div style="color: #ffd700;">Score: <span id="score-val">0</span></div>
+            <div style="color: #00ffcc;">Combo: <span id="combo-val">0</span></div>
+        </div>
+        <div id="judgment"></div>
+        <div id="hint">直接点击下方四条轨道进行打击</div>
+    </div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const laneCount = 4;
+const laneWidth = canvas.width / laneCount;
+const judgmentLineY = 510; 
+const noteSpeed = 0.45; // 稍作微调，更适合手机点击
+
+const laneColors = ['#00a2ff', '#00ff6c', '#00ff6c', '#00a2ff'];
+let keyStates = [false, false, false, false];
+
+const JUDGE_PERFECT = 55;
+const JUDGE_GREAT = 110;
+const JUDGE_MISS = 160;
+
+let gameStarted = false;
+let startTime = 0;
+let score = 0;
+let combo = 0;
+let notes = [];
+let audioCtx = null;
+
+function generateChart() {
+    notes = [];
+    // 随机生成 150 个音符
+    for (let i = 0; i < 150; i++) {
+        notes.push({
+            id: i,
+            time: 2000 + i * 500, 
+            lane: Math.floor(Math.random() * 4),
+            hit: false,
+            missed: false
+        });
+    }
+}
+
+function playHitSound() {
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(750, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.08);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.08);
+}
+
+function showJudgment(text, color) {
+    document.getElementById('judgment').innerText = text;
+    document.getElementById('judgment').style.color = color;
+}
+
+function judgeNote(laneIndex) {
+    if (!gameStarted) return;
+    const currentTime = performance.now() - startTime;
+    const targetNote = notes.find(n => n.lane === laneIndex && !n.hit && !n.missed);
+    
+    if (targetNote) {
+        const diff = Math.abs(targetNote.time - currentTime);
+        if (diff <= JUDGE_MISS) {
+            targetNote.hit = true;
+            playHitSound();
+            if (diff <= JUDGE_PERFECT) {
+                score += 100; combo++; showJudgment('PERFECT', '#ffcc00');
+            } else if (diff <= JUDGE_GREAT) {
+                score += 50; combo++; showJudgment('GREAT', '#00ffcc');
+            } else {
+                combo = 0; showJudgment('BAD', '#ff4444');
+            }
+            updateUI();
+        }
+    }
+}
+
+function updateUI() {
+    document.getElementById('score-val').innerText = score;
+    document.getElementById('combo-val').innerText = combo;
+}
+
+// ====== 核心：手机多指触控响应逻辑 ======
+function updateTouchStates(e) {
+    if (!gameStarted) return;
+    keyStates.fill(false); // 先清空状态
+    const rect = canvas.getBoundingClientRect();
+    
+    // 检查屏幕上所有的手指
+    for (let i = 0; i < e.touches.length; i++) {
+        const touch = e.touches[i];
+        // 换算手机屏幕坐标到游戏内部的 Canvas 坐标
+        const canvasX = (touch.clientX - rect.left) * (canvas.width / rect.width);
+        const laneIdx = Math.floor(canvasX / laneWidth);
+        if (laneIdx >= 0 && laneIdx < 4) {
+            keyStates[laneIdx] = true; // 激活对应轨道的按压特效
+        }
+    }
+}
+
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault(); // 阻止手机浏览器默认滚动
+    const rect = canvas.getBoundingClientRect();
+    
+    // 遍历刚放上去的手指（支持同时按下多个轨道）
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+        const canvasX = (touch.clientX - rect.left) * (canvas.width / rect.width);
+        const laneIdx = Math.floor(canvasX / laneWidth);
+        if (laneIdx >= 0 && laneIdx < 4) {
+            judgeNote(laneIdx); // 触发判定
+        }
+    }
+    updateTouchStates(e);
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    updateTouchStates(e);
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    updateTouchStates(e);
+}, { passive: false });
+
+
+// 游戏主循环
+function update(timestamp) {
+    if (!gameStarted) return;
+    const currentTime = timestamp - startTime;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 1. 绘制轨道
+    for (let i = 0; i < laneCount; i++) {
+        ctx.fillStyle = keyStates[i] ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.02)';
+        ctx.fillRect(i * laneWidth, 0, laneWidth, canvas.height);
+        ctx.strokeStyle = '#292929';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(i * laneWidth, 0, laneWidth, canvas.height);
+    }
+
+    // 2. 绘制判定线
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(0, judgmentLineY); ctx.lineTo(canvas.width, judgmentLineY); ctx.stroke();
+
+    // 3. 绘制音符
+    notes.forEach(note => {
+        if (note.hit) return;
+        const y = judgmentLineY - (note.time - currentTime) * noteSpeed;
+
+        if (currentTime - note.time > JUDGE_MISS && !note.missed) {
+            note.missed = true; combo = 0; showJudgment('MISS', '#888888'); updateUI();
+        }
+
+        if (y > -20 && y < canvas.height) {
+            ctx.fillStyle = laneColors[note.lane];
+            ctx.fillRect(note.lane * laneWidth + 6, y - 10, laneWidth - 12, 20); // 手机端稍微加厚音符，更易读
+        }
+    });
+
+    requestAnimationFrame(update);
+}
+
+document.getElementById('start-btn').addEventListener('click', () => {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    generateChart();
+    document.getElementById('start-btn').style.display = 'none';
+    document.getElementById('game-container').style.display = 'block';
+    gameStarted = true;
+    startTime = performance.now();
+    showJudgment('START!', '#fff');
+    requestAnimationFrame(update);
+});
+</script>
+</body>
+</html>
